@@ -83,7 +83,7 @@ package final class OutgoingStream {
         }
     }
 
-    /// Appends a sample buffer for publish.
+    /// Appends an audio buffer for publish.
     package func append(_ audioBuffer: AVAudioBuffer, when: AVAudioTime) {
         audioInputFormat = audioBuffer.format.formatDescription
         audioCodec.append(audioBuffer, when: when)

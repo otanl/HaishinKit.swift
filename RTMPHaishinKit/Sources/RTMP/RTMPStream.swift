@@ -220,6 +220,8 @@ public actor RTMPStream {
     private var dataTimestamps: [String: Date] = .init()
     private var audioTimestamp: RTMPTimestamp<AVAudioTime> = .init()
     private var videoTimestamp: RTMPTimestamp<CMTime> = .init()
+    private var compressedVideoStartTime: Date?  // 圧縮済みビデオの最初のフレーム時刻
+    private var lastCompressedVideoTimestamp: UInt32 = 0  // 前回のビデオタイムスタンプ（デルタ計算用）
     private var requestTimeout = RTMPConnection.defaultRequestTimeout
     private var expectedResponse: Code?
     package var bitRateStrategy: (any StreamBitRateStrategy)?
@@ -361,6 +363,12 @@ public actor RTMPStream {
         do {
             audioFormat = nil
             videoFormat = nil
+            // Reset timestamps to start from 0 for new publish session
+            audioTimestamp.clear()
+            videoTimestamp.clear()
+            compressedVideoStartTime = nil
+            lastCompressedVideoTimestamp = 0
+            frameCount = 0
             let response = try await withCheckedThrowingContinuation { continuation in
                 readyState = .publish
                 expectedResponse = Code.publishStart
@@ -727,18 +735,42 @@ extension RTMPStream: _Stream {
         switch sampleBuffer.formatDescription?.mediaType {
         case .video:
             if sampleBuffer.formatDescription?.isCompressed == true {
-                do {
-                    let decodeTimeStamp = sampleBuffer.decodeTimeStamp.isValid ? sampleBuffer.decodeTimeStamp : sampleBuffer.presentationTimeStamp
-                    let timedelta = try videoTimestamp.update(decodeTimeStamp)
-                    frameCount += 1
-                    videoFormat = sampleBuffer.formatDescription
-                    guard let message = RTMPVideoMessage(streamId: id, timestamp: timedelta, sampleBuffer: sampleBuffer) else {
-                        return
-                    }
-                    doOutput(.one, chunkStreamId: .video, message: message)
-                } catch {
-                    logger.warn(error)
+                // 圧縮済みビデオ：最初のフレーム時刻からの経過時間をタイムスタンプとして使用
+                // (Unityからのフレームなど、CMSampleBufferのタイムスタンプが単調増加でない場合に対応)
+                let isFirstVideoFrame = (compressedVideoStartTime == nil)
+                if isFirstVideoFrame {
+                    compressedVideoStartTime = Date()
+                    lastCompressedVideoTimestamp = 0
                 }
+
+                // 最初のフレームからの経過時間（ミリ秒）= 絶対タイムスタンプ
+                let absoluteTimestamp = UInt32(compressedVideoStartTime!.timeIntervalSinceNow * -1000)
+                // デルタタイムスタンプ = 今回の絶対タイムスタンプ - 前回の絶対タイムスタンプ
+                let deltaTimestamp = absoluteTimestamp - lastCompressedVideoTimestamp
+
+                frameCount += 1
+
+                // シーケンスヘッダーを送信（formatDescriptionが変わったとき）
+                let newFormat = sampleBuffer.formatDescription
+                if videoFormat != newFormat, let format = newFormat {
+                    let seqTimestamp: UInt32 = isFirstVideoFrame ? 0 : deltaTimestamp
+                    if let seqMessage = RTMPVideoMessage(streamId: id, timestamp: seqTimestamp, formatDescription: format) {
+                        doOutput(.zero, chunkStreamId: .video, message: seqMessage)
+                    }
+                }
+                videoFormat = newFormat
+
+                // ビデオフレームを送信
+                // 最初のフレーム: chunk type 0（絶対タイムスタンプ 0）
+                // 以降のフレーム: chunk type 1（デルタタイムスタンプ）
+                let videoTs: UInt32 = isFirstVideoFrame ? 0 : deltaTimestamp
+                guard let message = RTMPVideoMessage(streamId: id, timestamp: videoTs, sampleBuffer: sampleBuffer) else {
+                    return
+                }
+                doOutput(isFirstVideoFrame ? .zero : .one, chunkStreamId: .video, message: message)
+
+                // 次回のデルタ計算のために現在の絶対タイムスタンプを保存
+                lastCompressedVideoTimestamp = absoluteTimestamp
             } else {
                 outgoing.append(sampleBuffer)
                 if sampleBuffer.formatDescription?.isCompressed == false {

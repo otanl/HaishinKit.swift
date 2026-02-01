@@ -128,6 +128,11 @@ final class AudioCodec {
                 if inputBuffersCursor == inputBuffers.count {
                     inputBuffersCursor = Self.defaultInputBuffersCursor
                 }
+            case .error:
+                if logger.isEnabledFor(level: .warn) {
+                    logger.warn("AudioCodec convert error:", error as Any)
+                }
+                releaseOutputBuffer(outputBuffer)
             default:
                 releaseOutputBuffer(outputBuffer)
             }
