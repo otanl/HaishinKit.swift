@@ -1,0 +1,84 @@
+name: Unity Support Release
+
+on:
+  push:
+    branches:
+      - unity-support
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., unity-v1.0.0)'
+        required: false
+        default: ''
+
+jobs:
+  create-release-tag:
+    runs-on: ubuntu-latest
+    # Only run on workflow_dispatch with version input, or on push with [release] in commit message
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '') ||
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[release]'))
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # Generate version from date and commit
+            VERSION="unity-v$(date +%Y%m%d)-$(echo ${{ github.sha }} | cut -c1-7)"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Unity Support ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: true
+          body: |
+            ## HaishinKit.swift Unity Support
+
+            This release contains changes for Unity integration.
+
+            ### Changes from upstream
+
+            The `unity-support` branch includes the following modifications:
+
+            - **RTMPStream**: Elapsed time-based timestamps for compressed video
+            - **RTMPStream**: Timestamp reset on new publish session
+            - **AudioCodec**: Error logging for conversion failures
+            - **OutgoingStream**: Comment typo fix
+
+            ### Usage
+
+            Reference this branch in your Swift Package:
+            ```swift
+            .package(url: "https://github.com/otanl/HaishinKit.swift.git", branch: "unity-support")
+            ```
+
+            Or use this specific version:
+            ```swift
+            .package(url: "https://github.com/otanl/HaishinKit.swift.git", from: "${{ steps.version.outputs.version }}")
+            ```
+
+            ### Commit
+            ${{ github.sha }}
+
+  notify-downstream:
+    needs: create-release-tag
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - name: Trigger HaishinKit.unity workflow
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: otanl/HaishinKit.unity
+          event-type: upstream-updated
+          client-payload: '{"source": "HaishinKit.swift", "version": "${{ needs.create-release-tag.outputs.version }}"}'
+        continue-on-error: true  # Don't fail if dispatch fails
